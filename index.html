@@ -23,10 +23,10 @@
     <div id="error-screen" class="error-screen hidden">
         <div class="error-card">
             <div class="error-icon">⚠️</div>
-            <h2 class="error-title">خطأ في التشغيل</h2>
-            <p id="error-message" class="error-message">يوجد عطل في سيرفرات مزود البث</p>
+            <h2 id="error-title" class="error-title">خطأ في التشغيل</h2>
+            <p id="error-message" class="error-message">يوجد خطأ من مصدر البث</p>
             <div class="error-actions">
-                <button class="btn btn-secondary" onclick="window.close()">
+                <button id="error-close" class="btn btn-secondary" onclick="window.close()">
                     ✕ إغلاق
                 </button>
             </div>
@@ -91,6 +91,6 @@
         </div>
     </div>
 
-    <script src="js/player.js?v=9"></script>
+    <script src="js/player.js?v=10"></script>
 </body>
 </html>

@@ -6,7 +6,40 @@
 
 // === Configuration ===
 const BACKEND_URL = 'https://api.beeplayer1.com';
-const PROVIDER_STREAM_ERROR = 'يوجد عطل في سيرفرات مزود البث';
+
+// === Localization ===
+// Language comes from the `lang` query param (passed by the website based on the
+// user's selected locale). Defaults to Arabic. Only 'ar' and 'en' are supported.
+const LANG = (new URLSearchParams(window.location.search).get('lang') || 'ar')
+  .toLowerCase()
+  .startsWith('en')
+  ? 'en'
+  : 'ar';
+
+const STRINGS = {
+  ar: {
+    providerError: 'يوجد خطأ من مصدر البث',
+    errorTitle: 'خطأ في التشغيل',
+    close: '✕ إغلاق',
+    defaultTitle: 'مشغل الفيديو',
+    noStreamUrl: 'لم يتم تحديد رابط البث',
+    tokenMissing: 'رمز المصادقة مفقود. يرجى تسجيل الدخول مرة أخرى.',
+    tokenInvalid: 'رمز المصادقة غير صالح أو منتهي الصلاحية. يرجى تسجيل الدخول مرة أخرى.',
+    aborted: 'تم إلغاء تشغيل الفيديو.',
+  },
+  en: {
+    providerError: 'There is an error from the stream source',
+    errorTitle: 'Playback error',
+    close: '✕ Close',
+    defaultTitle: 'Video Player',
+    noStreamUrl: 'No stream URL specified',
+    tokenMissing: 'Authentication token is missing. Please log in again.',
+    tokenInvalid: 'Authentication token is invalid or expired. Please log in again.',
+    aborted: 'Video playback was aborted.',
+  },
+};
+const T = STRINGS[LANG];
+const PROVIDER_STREAM_ERROR = T.providerError;
 
 // Cloudflare Worker stream proxy. Used as a fallback when a stream fails to play
 // directly in the browser because of CORS (provider 302-redirects to a CDN that
@@ -52,10 +85,12 @@ let triedWorker = false; // guard: only escalate to the Cloudflare Worker once
 
 // === Init ===
 (function init() {
+    applyLocale();
+
     const params = new URLSearchParams(window.location.search);
     streamUrl = params.get('url') || '';
     token = params.get('token') || '';
-    title = params.get('title') || 'مشغل الفيديو';
+    title = params.get('title') || T.defaultTitle;
     returnUrl = params.get('return') || '';
 
     videoTitle.textContent = decodeURIComponent(title);
@@ -66,12 +101,12 @@ let triedWorker = false; // guard: only escalate to the Cloudflare Worker once
     }
 
     if (!streamUrl) {
-        showError('لم يتم تحديد رابط البث');
+        showError(T.noStreamUrl);
         return;
     }
 
     if (!token) {
-        showError('رمز المصادقة مفقود. يرجى تسجيل الدخول مرة أخرى.');
+        showError(T.tokenMissing);
         return;
     }
 
@@ -81,7 +116,7 @@ let triedWorker = false; // guard: only escalate to the Cloudflare Worker once
             if (valid) {
                 startPlayback(decodeURIComponent(streamUrl));
             } else {
-                showError('رمز المصادقة غير صالح أو منتهي الصلاحية. يرجى تسجيل الدخول مرة أخرى.');
+                showError(T.tokenInvalid);
             }
         })
         .catch(err => {
@@ -488,12 +523,25 @@ function handleVideoError(e) {
   // Stream load/play failures are almost always the IPTV provider, not BeePlayer.
   let msg = PROVIDER_STREAM_ERROR;
   if (video.error && video.error.code === MediaError.MEDIA_ERR_ABORTED) {
-    msg = "تم إلغاء تشغيل الفيديو.";
+    msg = T.aborted;
   }
   showError(msg);
 }
 
 // === UI Functions ===
+function applyLocale() {
+  document.documentElement.lang = LANG;
+  document.documentElement.dir = LANG === "ar" ? "rtl" : "ltr";
+
+  const titleEl = document.getElementById("error-title");
+  if (titleEl) titleEl.textContent = T.errorTitle;
+
+  const closeBtn = document.getElementById("error-close");
+  if (closeBtn) closeBtn.textContent = T.close;
+
+  if (errorMessage) errorMessage.textContent = T.providerError;
+}
+
 function showError(msg) {
   loadingScreen.classList.add("hidden");
   playerContainer.classList.add("hidden");
