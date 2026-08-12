@@ -232,6 +232,11 @@ function reportPlaybackFailure(rawUrl) {
         "All playback approaches failed: " +
         ((lastPlaybackError && lastPlaybackError.details) || "unknown"),
       upstreamUrl: rawUrl,
+      // The channel name is already in the launch URL's `title` param; sending
+      // it explicitly is what puts "which channel broke" on the dashboard row.
+      // `title` comes from URLSearchParams.get(), so it is already decoded —
+      // decoding again would throw on any title containing a literal '%'.
+      contentName: title ? String(title).slice(0, 200) : undefined,
       contentType: rawUrl && rawUrl.indexOf("/live/") !== -1 ? "live" : undefined,
       context: lastPlaybackError || undefined,
     });
