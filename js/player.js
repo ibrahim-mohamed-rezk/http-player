@@ -212,7 +212,33 @@ function escalateToWorker(rawUrl) {
 // message — no VLC/retry UI.
 function showVlcFallback(rawUrl) {
   cleanupPlayers();
+  // Reported here rather than on each fatal HLS error: the escalation chain
+  // above recovers most of them, so only reaching this point is a real,
+  // user-visible failure. lastPlaybackError carries the underlying cause.
+  reportPlaybackFailure(rawUrl);
   showError(PROVIDER_STREAM_ERROR);
+}
+
+// Underlying cause of the current escalation chain, set by the HLS/mpegts
+// handlers and consumed by showVlcFallback.
+var lastPlaybackError = null;
+
+function reportPlaybackFailure(rawUrl) {
+  try {
+    if (!window.BeeErrorReporter) return;
+    window.BeeErrorReporter.report({
+      errorType: (lastPlaybackError && lastPlaybackError.type) || "PlaybackFailed",
+      message:
+        "All playback approaches failed: " +
+        ((lastPlaybackError && lastPlaybackError.details) || "unknown"),
+      upstreamUrl: rawUrl,
+      contentType: rawUrl && rawUrl.indexOf("/live/") !== -1 ? "live" : undefined,
+      context: lastPlaybackError || undefined,
+    });
+    lastPlaybackError = null;
+  } catch (_) {
+    /* never break the error screen */
+  }
 }
 
 function cleanupPlayers() {
@@ -360,6 +386,13 @@ function playHLS(url) {
     hlsInstance.on(Hls.Events.ERROR, (_, data) => {
       console.error("HLS error:", data);
       if (data.fatal) {
+        // Remember the cause; showVlcFallback reports it if the escalation
+        // chain below runs out of options.
+        lastPlaybackError = {
+          type: "Hls" + (data.type || "FatalError"),
+          details: String(data.details || "unknown"),
+          httpStatus: data.response && data.response.code,
+        };
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
             console.log(
@@ -466,6 +499,11 @@ function playMpegTS(url) {
 
   mpegtsPlayer.on(mpegts.Events.ERROR, (type, detail) => {
     console.error("mpegts error:", type, detail);
+    // Recorded for showVlcFallback; see the HLS handler for the rationale.
+    lastPlaybackError = {
+      type: "Mpegts" + String(type || "Error"),
+      details: String(detail || "unknown"),
+    };
     // If this attempt was already the direct provider URL, the failure is almost
     // certainly CORS on a cross-origin 302 redirect. Native <video> can't demux
     // raw MPEG-TS, so escalate to the Worker proxy instead of native.
