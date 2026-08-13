@@ -223,6 +223,21 @@ function showVlcFallback(rawUrl) {
 // handlers and consumed by showVlcFallback.
 var lastPlaybackError = null;
 
+/**
+ * Add a breadcrumb if the reporter loaded. Kept as a one-liner so instrumenting
+ * a code path costs nothing and can never throw into playback — error-reporter.js
+ * is a separate script tag and may legitimately be absent.
+ */
+function crumb(type, message, data) {
+  try {
+    if (window.BeeErrorReporter && window.BeeErrorReporter.breadcrumb) {
+      window.BeeErrorReporter.breadcrumb(type, message, data);
+    }
+  } catch (_) {
+    /* never break playback */
+  }
+}
+
 function reportPlaybackFailure(rawUrl) {
   try {
     if (!window.BeeErrorReporter) return;
@@ -384,12 +399,20 @@ function playHLS(url) {
 
     hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
       console.log("✅ HLS manifest parsed");
+      crumb("player", "HLS manifest parsed");
       hideLoading();
       video.play().catch(() => hideLoading());
     });
 
     hlsInstance.on(Hls.Events.ERROR, (_, data) => {
       console.error("HLS error:", data);
+      // Non-fatal errors are the interesting ones in the trail: a stream that
+      // dies usually stutters through a dozen recoverable 404s first, and that
+      // pattern is what tells you the provider is failing rather than the app.
+      crumb("player", "HLS error " + (data.details || data.type), {
+        fatal: !!data.fatal,
+        status: data.response && data.response.code,
+      });
       if (data.fatal) {
         // Remember the cause; showVlcFallback reports it if the escalation
         // chain below runs out of options.
@@ -499,11 +522,13 @@ function playMpegTS(url) {
 
   mpegtsPlayer.on(mpegts.Events.MEDIA_INFO, () => {
     console.log("✅ MPEG-TS media info received");
+    crumb("player", "MPEG-TS media info received");
     hideLoading();
   });
 
   mpegtsPlayer.on(mpegts.Events.ERROR, (type, detail) => {
     console.error("mpegts error:", type, detail);
+    crumb("player", "mpegts error " + String(type || "") + " " + String(detail || ""));
     // Recorded for showVlcFallback; see the HLS handler for the rationale.
     lastPlaybackError = {
       type: "Mpegts" + String(type || "Error"),
