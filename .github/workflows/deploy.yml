@@ -23,7 +23,10 @@ jobs:
         with:
           server: ${{ secrets.SFTP_SERVER }}
           username: ${{ secrets.SFTP_USERNAME }}
-          password: ${{ secrets.SFTP_PASSWORD }}
+          # Key auth, not password: the server set PasswordAuthentication no on
+          # 2026-09-14 (/etc/ssh/sshd_config.d/01-no-password-auth.conf), which
+          # broke every deploy here with "Permission denied (publickey)".
+          ssh_private_key: ${{ secrets.SFTP_PRIVATE_KEY }}
           port: ${{ secrets.SFTP_PORT }}
           # Uploads index.html, css/ and js/ (dotfiles like .git/.github are excluded by ./*)
           local_path: './*'
