@@ -110,6 +110,19 @@ html, body {
     margin-bottom: 24px;
 }
 
+/* Technical detail (e.g. the provider's status code). Deliberately quiet: it is
+   for the support ticket, not for the viewer. Always LTR — a code like
+   "459" inside an RTL paragraph otherwise renders with its label reversed. */
+.error-detail {
+    color: var(--text-secondary);
+    opacity: 0.6;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    direction: ltr;
+    margin-top: -14px;
+    margin-bottom: 20px;
+}
+
 .error-actions {
     display: flex;
     gap: 12px;

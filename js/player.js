@@ -26,6 +26,10 @@ const STRINGS = {
     tokenMissing: 'رمز المصادقة مفقود. يرجى تسجيل الدخول مرة أخرى.',
     tokenInvalid: 'رمز المصادقة غير صالح أو منتهي الصلاحية. يرجى تسجيل الدخول مرة أخرى.',
     aborted: 'تم إلغاء تشغيل الفيديو.',
+    geoTitle: 'القناة محظورة في بلدك',
+    geoBlocked:
+      'مزود البث يمنع المشاهدة من بلدك أو من شبكتك الحالية. هذه ليست مشكلة في BeePlayer. جرّب قائمة تشغيل أخرى أو تواصل مع مزود الخدمة.',
+    providerCode: 'رمز المزود',
   },
   en: {
     providerError: 'There is an error from the stream source',
@@ -36,10 +40,23 @@ const STRINGS = {
     tokenMissing: 'Authentication token is missing. Please log in again.',
     tokenInvalid: 'Authentication token is invalid or expired. Please log in again.',
     aborted: 'Video playback was aborted.',
+    geoTitle: 'Blocked in your country',
+    geoBlocked:
+      'The stream provider does not allow viewing from your country or current network. This is not a BeePlayer problem. Try another playlist or contact your provider.',
+    providerCode: 'Provider code',
   },
 };
 const T = STRINGS[LANG];
 const PROVIDER_STREAM_ERROR = T.providerError;
+
+// === Provider geo-blocking ===
+// Xtream panels answer a refused location with a vendor status code rather than
+// a standard one: 459 carries a "country-not-allow" body, 467 is the same
+// refusal with an empty body (the code the backend already treats as a provider
+// block — see iptv.service.ts). 451 is the standard legal/geo refusal.
+const GEO_BLOCK_STATUSES = [451, 459, 467];
+const GEO_BLOCK_BODY_PATTERN =
+  /country[\s_-]?not[\s_-]?allow|not available in your (region|country)|geo[\s-]?block/i;
 
 // Cloudflare Worker stream proxy. Used as a fallback when a stream fails to play
 // directly in the browser because of CORS (provider 302-redirects to a CDN that
@@ -208,15 +225,84 @@ function escalateToWorker(rawUrl) {
   return true;
 }
 
+// Is this provider response a geo-block rather than an ordinary outage?
+// `body` is optional: 467 arrives with an empty body, so the status alone has
+// to be enough to classify it.
+function isGeoBlock(status, body) {
+  if (GEO_BLOCK_STATUSES.indexOf(Number(status)) !== -1) return true;
+  return !!body && GEO_BLOCK_BODY_PATTERN.test(body);
+}
+
+/**
+ * Ask the provider directly why playback failed.
+ *
+ * hls.js surfaces the upstream status, but mpegts.js and native <video> do not,
+ * so a blocked stream is indistinguishable from a dead one by the time we reach
+ * the error screen. One short GET recovers the status and the (tiny) error body.
+ * Panels send `Access-Control-Allow-Origin: *` on these refusals, so the status
+ * is readable; when a provider does not, the fetch rejects and we simply keep
+ * the generic message.
+ *
+ * Resolves to { status, body } or null if nothing could be determined.
+ */
+async function probeProviderStatus(rawUrl) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4000);
+  try {
+    const res = await fetch(rawUrl, { mode: "cors", signal: controller.signal });
+    // A playing stream is an endless body — never read it, just drop the
+    // connection. Only refusals (short HTML/text) are worth reading.
+    if (res.ok) {
+      controller.abort();
+      return { status: res.status, body: "" };
+    }
+    const body = await res.text();
+    return { status: res.status, body: body.slice(0, 200) };
+  } catch (_) {
+    // CORS-opaque, offline, or aborted — no verdict available.
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Last resort: everything failed (direct + Worker). Show the provider-outage
 // message — no VLC/retry UI.
 function showVlcFallback(rawUrl) {
   cleanupPlayers();
+  // Capture before reportPlaybackFailure clears it: hls.js may already have
+  // told us the upstream status, which saves a probe round-trip.
+  const knownStatus = lastPlaybackError && lastPlaybackError.httpStatus;
   // Reported here rather than on each fatal HLS error: the escalation chain
   // above recovers most of them, so only reaching this point is a real,
   // user-visible failure. lastPlaybackError carries the underlying cause.
   reportPlaybackFailure(rawUrl);
+
+  if (isGeoBlock(knownStatus)) {
+    showGeoBlockError(rawUrl, knownStatus);
+    return;
+  }
+
+  // Show the generic failure now rather than after the probe: the stream is
+  // already dead either way, and a spinner that hangs on a slow provider is
+  // worse than a message that sharpens a moment later.
   showError(PROVIDER_STREAM_ERROR);
+  probeProviderStatus(rawUrl).then((probe) => {
+    if (probe && isGeoBlock(probe.status, probe.body)) {
+      showGeoBlockError(rawUrl, probe.status);
+    }
+  });
+}
+
+// Replace the generic provider error with the specific geo-block explanation.
+function showGeoBlockError(rawUrl, status) {
+  crumb("player", "geo-block detected", { status: status });
+  reportGeoBlock(rawUrl, status);
+  showError(T.geoBlocked, {
+    title: T.geoTitle,
+    icon: "🌍",
+    detail: status ? T.providerCode + ": " + status : "",
+  });
 }
 
 // Underlying cause of the current escalation chain, set by the HLS/mpegts
@@ -256,6 +342,27 @@ function reportPlaybackFailure(rawUrl) {
       context: lastPlaybackError || undefined,
     });
     lastPlaybackError = null;
+  } catch (_) {
+    /* never break the error screen */
+  }
+}
+
+/**
+ * Report a geo-block under its own error type. It reaches the dashboard as a
+ * distinct row from a generic playback failure, so a provider that has started
+ * refusing a whole country is visible as a pattern instead of noise.
+ */
+function reportGeoBlock(rawUrl, status) {
+  try {
+    if (!window.BeeErrorReporter) return;
+    window.BeeErrorReporter.report({
+      errorType: "GeoBlocked",
+      message: "Provider refused this location (status " + (status || "unknown") + ")",
+      upstreamUrl: rawUrl,
+      contentName: title ? String(title).slice(0, 200) : undefined,
+      contentType: rawUrl && rawUrl.indexOf("/live/") !== -1 ? "live" : undefined,
+      context: { httpStatus: status },
+    });
   } catch (_) {
     /* never break the error screen */
   }
@@ -610,11 +717,32 @@ function applyLocale() {
   if (errorMessage) errorMessage.textContent = T.providerError;
 }
 
-function showError(msg) {
+/**
+ * Show the error screen.
+ *
+ * `opts` lets a caller give the failure its own identity — title, icon and a
+ * muted technical detail line (the provider's status code, which is the first
+ * thing support asks for). Omitted parts fall back to the generic playback
+ * error, so existing single-argument callers are unchanged.
+ */
+function showError(msg, opts) {
+  const o = opts || {};
   loadingScreen.classList.add("hidden");
   playerContainer.classList.add("hidden");
   errorScreen.classList.remove("hidden");
   errorMessage.textContent = msg;
+
+  const titleEl = document.getElementById("error-title");
+  if (titleEl) titleEl.textContent = o.title || T.errorTitle;
+
+  const iconEl = document.getElementById("error-icon");
+  if (iconEl) iconEl.textContent = o.icon || "⚠️";
+
+  const detailEl = document.getElementById("error-detail");
+  if (detailEl) {
+    detailEl.textContent = o.detail || "";
+    detailEl.classList.toggle("hidden", !o.detail);
+  }
 }
 
 function showPlayer() {
