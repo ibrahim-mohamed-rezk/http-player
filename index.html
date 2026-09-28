@@ -6,7 +6,11 @@
     <title>BeePlayer - مشغل الفيديو</title>
     <meta name="description" content="BeePlayer - مشغل IPTV مباشر">
     <meta name="referrer" content="no-referrer">
-    <link rel="stylesheet" href="css/style.css">
+    <!-- ?v= is required, not cosmetic: nginx serves css/js here with
+         "expires 7d, immutable", so an unversioned URL keeps returning viewers
+         on the cached copy for a week with no revalidation. Bump on every
+         change to this file's assets. -->
+    <link rel="stylesheet" href="css/style.css?v=2">
     <!-- HLS.js for .m3u8 streams -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <!-- mpegts.js for .ts streams -->
@@ -94,6 +98,6 @@
 
     <!-- Loaded before player.js so window.onerror is installed first. -->
     <script src="js/error-reporter.js?v=2"></script>
-    <script src="js/player.js?v=13"></script>
+    <script src="js/player.js?v=14"></script>
 </body>
 </html>
