@@ -7,10 +7,19 @@
 // === Configuration ===
 const BACKEND_URL = 'https://api.beeplayer1.com';
 
+// === Launch parameters ===
+// The site opens this page as http://player.beeplayer1.com/#url=…&ticket=…
+// &title=…&return=…&lang=… — everything in the URL fragment, which the browser
+// never sends to a server, so the provider URL and ticket stay out of HTTP
+// request lines, nginx logs and Referer headers. The ticket is a short-lived,
+// single-stream pass from the backend (POST /auth/playback-ticket), never the
+// customer's session token. init() clears the fragment from the address bar.
+const LAUNCH = new URLSearchParams(window.location.hash.slice(1));
+
 // === Localization ===
-// Language comes from the `lang` query param (passed by the website based on the
+// Language comes from the `lang` launch param (passed by the website based on the
 // user's selected locale). Defaults to Arabic. Only 'ar' and 'en' are supported.
-const LANG = (new URLSearchParams(window.location.search).get('lang') || 'ar')
+const LANG = (LAUNCH.get('lang') || 'ar')
   .toLowerCase()
   .startsWith('en')
   ? 'en'
@@ -23,8 +32,7 @@ const STRINGS = {
     close: '✕ إغلاق',
     defaultTitle: 'مشغل الفيديو',
     noStreamUrl: 'لم يتم تحديد رابط البث',
-    tokenMissing: 'رمز المصادقة مفقود. يرجى تسجيل الدخول مرة أخرى.',
-    tokenInvalid: 'رمز المصادقة غير صالح أو منتهي الصلاحية. يرجى تسجيل الدخول مرة أخرى.',
+    ticketInvalid: 'رابط التشغيل غير صالح أو منتهي الصلاحية. يرجى فتحه من الموقع مرة أخرى.',
     aborted: 'تم إلغاء تشغيل الفيديو.',
     geoTitle: 'القناة محظورة في بلدك',
     geoBlocked:
@@ -37,8 +45,7 @@ const STRINGS = {
     close: '✕ Close',
     defaultTitle: 'Video Player',
     noStreamUrl: 'No stream URL specified',
-    tokenMissing: 'Authentication token is missing. Please log in again.',
-    tokenInvalid: 'Authentication token is invalid or expired. Please log in again.',
+    ticketInvalid: 'This playback link is invalid or expired. Please open it again from the website.',
     aborted: 'Video playback was aborted.',
     geoTitle: 'Blocked in your country',
     geoBlocked:
@@ -95,25 +102,29 @@ let controlsTimer = null;
 let isMuted = false;
 let previousVolume = 100;
 let streamUrl = '';
-let token = '';
+let ticket = '';
 let title = '';
 let returnUrl = '';
 let triedWorker = false; // guard: only escalate to the Cloudflare Worker once
+let controlsReady = false; // UI listeners are registered once, not per retry
 
 // === Init ===
 (function init() {
     applyLocale();
 
-    const params = new URLSearchParams(window.location.search);
-    streamUrl = params.get('url') || '';
-    token = params.get('token') || '';
-    title = params.get('title') || T.defaultTitle;
-    returnUrl = params.get('return') || '';
+    // URLSearchParams already decodes; do not decode again.
+    streamUrl = LAUNCH.get('url') || '';
+    ticket = LAUNCH.get('ticket') || '';
+    title = LAUNCH.get('title') || T.defaultTitle;
+    returnUrl = LAUNCH.get('return') || '';
 
-    videoTitle.textContent = decodeURIComponent(title);
+    // Drop the fragment from the address bar and history.
+    history.replaceState(null, '', window.location.pathname);
 
-    if (returnUrl) {
-        backLink.href = decodeURIComponent(returnUrl);
+    videoTitle.textContent = title;
+
+    if (isSafeReturnUrl(returnUrl)) {
+        backLink.href = returnUrl;
         backLink.onclick = null; // Use the href
     }
 
@@ -122,53 +133,55 @@ let triedWorker = false; // guard: only escalate to the Cloudflare Worker once
         return;
     }
 
-    if (!token) {
-        showError(T.tokenMissing);
-        return;
-    }
-
-    // Validate token then play
-    validateToken(token)
-        .then(valid => {
-            if (valid) {
-                startPlayback(decodeURIComponent(streamUrl));
-            } else {
-                showError(T.tokenInvalid);
-            }
-        })
-        .catch(err => {
-            console.error('Token validation error:', err);
-            // If validation fails (e.g. network error), still try to play
-            // The stream might work anyway
-            startPlayback(decodeURIComponent(streamUrl));
-        });
+    playIfTicketValid();
 })();
 
-// === Token Validation ===
-async function validateToken(token) {
-    try {
-        // 5-second timeout to avoid blocking playback
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+// The only way into playback, on first load and on retry: no ticket the
+// backend accepts for this stream, no playback.
+function playIfTicketValid() {
+    if (!streamUrl || !ticket) {
+        showError(T.ticketInvalid);
+        return;
+    }
+    verifyTicket(ticket, streamUrl).then(valid => {
+        if (valid) {
+            startPlayback(streamUrl);
+        } else {
+            showError(T.ticketInvalid);
+        }
+    });
+}
 
-        const res = await fetch(`${BACKEND_URL}/customers/test`, {
-            method: 'GET',
+// Only send people back to the BeePlayer site itself.
+function isSafeReturnUrl(url) {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'https:' &&
+            (parsed.hostname === 'beeplayer1.com' || parsed.hostname === 'www.beeplayer1.com');
+    } catch (e) {
+        return false;
+    }
+}
+
+// === Ticket Verification ===
+// Fails closed: a rejected ticket, a timeout or a network error all stop here.
+async function verifyTicket(ticket, url) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+        const res = await fetch(`${BACKEND_URL}/auth/playback-ticket/verify`, {
+            method: 'POST',
             mode: 'cors',
-            headers: { 'Authorization': `Bearer ${token}` },
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket, url }),
             signal: controller.signal,
         });
-
-        clearTimeout(timeoutId);
         return res.ok;
     } catch (e) {
-        // CORS or network error - allow playback to proceed
-        // The stream URL itself is the real security gate (time-limited by IPTV provider)
-        if (e.name === 'AbortError') {
-            console.warn('Token validation timed out, proceeding with playback...');
-        } else {
-            console.warn('Token validation blocked (CORS/network), proceeding with playback...');
-        }
-        return true;
+        console.warn('Playback ticket verification failed');
+        return false;
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -424,9 +437,8 @@ function detectFormat(url) {
 // === Start Playback ===
 function startPlayback(url) {
   const format = detectFormat(url);
-  console.log(
-    `🎬 Starting playback: format=${format}, url=${url.substring(0, 80)}...`,
-  );
+  // The stream URL carries provider credentials; never log it.
+  console.log(`🎬 Starting playback: format=${format}`);
 
   showPlayer();
 
@@ -443,8 +455,13 @@ function startPlayback(url) {
       break;
   }
 
-  setupControls();
-  setupKeyboard();
+  // Retries and Worker escalation come back through here; register UI
+  // listeners only once or Space/click toggle twice and cancel out.
+  if (!controlsReady) {
+    controlsReady = true;
+    setupControls();
+    setupKeyboard();
+  }
 }
 
 function playNative(url) {
@@ -512,7 +529,8 @@ function playHLS(url) {
     });
 
     hlsInstance.on(Hls.Events.ERROR, (_, data) => {
-      console.error("HLS error:", data);
+      // The payload carries request URLs (provider credentials); log the kind only.
+      console.error("HLS error:", data.type, data.details, data.fatal);
       // Non-fatal errors are the interesting ones in the trail: a stream that
       // dies usually stutters through a dozen recoverable 404s first, and that
       // pattern is what tells you the provider is failing rather than the app.
@@ -605,6 +623,8 @@ function playMpegTS(url) {
   const lastSeg = (detectUrl.split("?")[0].split("/").filter(Boolean).pop() || "");
   const isLive = detectUrl.includes("/live/") || !lastSeg.includes(".");
 
+  // mpegts.js logs loader errors with the full stream URL (credentials).
+  mpegts.LoggingControl.enableAll = false;
   mpegtsPlayer = mpegts.createPlayer(
     {
       type: "mpegts",
@@ -671,7 +691,7 @@ function playMpegTS(url) {
 
 // === Error Handling ===
 function handleVideoError(e) {
-  console.error("Video error:", e);
+  console.error("Video error:", video.error ? video.error.code : undefined);
 
   // Native <video> failed. Before showing an error, try the escalation chain:
   //   direct → Worker proxy → VLC fallback.
@@ -765,12 +785,13 @@ function retryPlayback() {
   triedWorker = false; // fresh escalation chain on manual retry
   cleanupPlayers();
 
-  startPlayback(decodeURIComponent(streamUrl));
+  // Same ticket gate as the first load.
+  playIfTicketValid();
 }
 
 function goBack() {
-    if (returnUrl) {
-        window.location.href = decodeURIComponent(returnUrl);
+    if (isSafeReturnUrl(returnUrl)) {
+        window.location.href = returnUrl;
     } else {
         window.close();
         // If window.close() doesn't work (not opened via script), go back in history
